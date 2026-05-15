@@ -1,0 +1,45 @@
+# FAST-LIO + Localization pipeline configuration
+
+data:
+  # Bag file path relative to /data inside container
+  bag: "E-2004-A2/state1_art_filtered.bag"
+  # Reference cloud for alignment (relative to /data)
+  reference_cloud: "E-2004-A2/state1_0.01.ply"
+  # Downsampled reference (used for faster computation)
+  downsampled_reference_cloud: "E-2004-A2/state1_0.01.ply"
+
+processing:
+  # Duration to extract from rosbag (seconds)
+  duration: 40
+  # Time interval between alignment operations (seconds)
+  align_interval: 2.0
+  # Accumulate point clouds from last N seconds
+  map_accumulation_time: 2.0
+
+alignment:
+  # Voxel size for global alignment feature computation
+  voxel_size_global: 0.4
+  # Voxel size for local ICP alignment
+  voxel_size_local: 0.1
+  # Distance threshold for ICP correspondence
+  icp_threshold: 0.5
+  # Global alignment method (FPFH_RANSAC)
+  global_method: "FPFH_RANSAC"
+  # Local alignment method (P2PLANE_ICP is more robust)
+  local_method: "P2PLANE_ICP"
+
+topics:
+  # Point cloud topic from FAST-LIO (should contain registered cloud)
+  cloud_registered: "/cloud_registered"
+  # Odometry topic from FAST-LIO
+  odometry: "/Odometry"
+  # Output: transformed odometry in reference frame
+  odometry_ref: "/localization/odometry_ref"
+  # Output: transformation matrix (reference frame to map frame)
+  transform: "/localization/transform"
+  # Output: fitness scores from alignment
+  fitness: "/localization/fitness"
+
+output:
+  # Output directory (inside container: /results)
+  dir: "/results"
