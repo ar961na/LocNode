@@ -1,4 +1,4 @@
-# FAST-LIO + Localization Pipeline
+# FAST-LIO2 + Localization Pipeline
 
 A Docker-based LiDAR localization pipeline combining FAST-LIO2 mapping with point cloud alignment to a reference model.
 
@@ -41,7 +41,6 @@ LocNode/
 │       ├── pipeline_config.yaml      # Config snapshot
 │       └── cached_maps/              # FPFH features cache
 └── scripts/
-    ├── align_standalone.py          # Offline alignment without ROS
     ├── downsample_reference.py       # Utility to downsample point clouds
     └── visualize.py                  # Unified visualization (point clouds & trajectories)
 ```
@@ -146,10 +145,10 @@ head results/run_YYYYMMDD_HHMMSS/trajectory_reference.txt
 # View detailed metrics
 cat results/run_YYYYMMDD_HHMMSS/alignment_log.txt
 
-# Visualize
-python3 scripts/visualize_trajectory.py \
+# Visualize trajectory over the reference cloud
+python3 scripts/visualize.py \
   --traj results/run_YYYYMMDD_HHMMSS/trajectory_reference.txt \
-  --reference data/E-2004-A2/reference.ply
+  --cloud data/location/reference.ply --cloud-bg --visualize
 ```
 
 ## Output Files
@@ -199,48 +198,52 @@ python3 scripts/downsample_reference.py \
 
 ### Visualize Trajectories and Point Clouds
 
-**Unified visualization script** for both trajectories and point clouds:
+**Unified visualization script** for trajectories and point clouds, separately or
+together. Both `--cloud` and `--traj` accept multiple files and may be combined.
 
 ```bash
-# Visualize trajectory with reference cloud
+# Trajectory over the reference cloud (cloud muted to gray background)
 python3 scripts/visualize.py \
   --traj trajectory.txt \
-  --reference reference.ply \
+  --cloud reference.ply --cloud-bg \
   --visualize
 
-# Save trajectory as rotating GIF
+# Save a trajectory + reference as a rotating GIF (framed on the trajectory)
 python3 scripts/visualize.py \
   --traj trajectory.txt \
-  --reference reference.ply \
+  --cloud reference.ply --cloud-bg \
   --output trajectory.gif --duration 3
 
-# Visualize multiple trajectories
+# Compare multiple trajectories (each gets a distinct auto-generated color)
 python3 scripts/visualize.py \
   --traj trajectory1.txt trajectory2.txt \
-  --reference reference.ply \
+  --cloud reference.ply --cloud-bg \
   --visualize
 
-# Visualize point cloud as rotating GIF
+# Point cloud as a rotating GIF
 python3 scripts/visualize.py \
   --cloud cloud.ply \
   --output cloud.gif --fps 15 --duration 5
 
-# Interactive point cloud visualization
+# Interactive point cloud view
 python3 scripts/visualize.py \
   --cloud cloud.ply \
   --visualize
 ```
 
 **Command-line options:**
-- `--cloud FILE`: Point cloud to visualize (.pcd, .ply, .obj)
-- `--traj FILE [FILE ...]`: Trajectory file(s) in TUM format
-- `--reference FILE`: Reference point cloud for overlay (.pcd, .ply, .obj)
-- `--output FILE`: Save as GIF (if not specified, defaults to `--visualize`)
-- `--visualize, -v`: Show interactive 3D visualization
-- `--fps N`: Frames per second for GIF (default: 10)
-- `--duration N`: Rotation duration in seconds (default: 5)
-- `--width N`: Output width in pixels (default: 1024)
-- `--height N`: Output height in pixels (default: 768)
+- `--cloud, -c FILE [FILE ...]`: Point cloud file(s) to render (.pcd, .ply, .obj)
+- `--traj, -t FILE [FILE ...]`: Trajectory file(s) in TUM format
+- `--output, -o FILE`: Save as a rotating GIF to this path
+- `--visualize, -v`: Show an interactive 3D window (default if `--output` is omitted)
+- `--cloud-bg`: Render clouds in gray so colored trajectories stand out
+- `--traj-downsample N`: Keep every Nth trajectory pose when drawing (default: 5)
+- `--fps N`: GIF frames per second (default: 10)
+- `--duration N`: GIF rotation duration in seconds (default: 5)
+- `--width N` / `--height N`: Output resolution (default: 1024×768)
+
+> At least one of `--cloud` / `--traj` is required, and the two can be combined.
+> When both are given, a rotating GIF is framed around the trajectory.
 
 ## Customization
 

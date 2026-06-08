@@ -45,13 +45,13 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 # Output formatting functions
-print_header() { echo ""; echo "╔════════════════════════════════════════════════════════════════════════════╗"; echo "║  $1"; echo "╚════════════════════════════════════════════════════════════════════════════╝"; echo ""; }
+print_header() { echo ""; echo -e "${BLUE}=== $1 ===${NC}"; echo ""; }
 print_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 print_success() { echo -e "${GREEN}[✓]${NC} $1"; }
 print_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
 
 # Start
-print_header "FASTLIO + LOCALIZATION - DOCKER ALL-IN-ONE"
+print_header "FAST-LIO2 + LOCALIZATION"
 echo "Working from: $SCRIPT_DIR"
 echo "Workspace root: $WORKSPACE_ROOT"
 echo "Output directory: $OUTPUT_DIR_REL"

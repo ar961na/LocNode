@@ -2,11 +2,11 @@
 
 data:
   # Bag file path relative to /data inside container
-  bag: "E-2004-A2/state1_art_filtered.bag"
+  bag: "workshop/state1_art_filtered.bag"
   # Reference cloud for alignment (relative to /data)
-  reference_cloud: "E-2004-A2/state1_0.01.ply"
+  reference_cloud: "workshop/state1_0.01.ply"
   # Downsampled reference (used for faster computation)
-  downsampled_reference_cloud: "E-2004-A2/state1_0.01.ply"
+  downsampled_reference_cloud: "workshop/state1_0.01.ply"
 
 processing:
   # Duration to extract from rosbag (seconds)
