@@ -291,14 +291,14 @@ def transform_trajectory(trajectory: list, T: np.ndarray) -> list:
 
     arr = np.array(trajectory)  # (N, 8)
     timestamps = arr[:, 0:1]  # (N, 1)
-    positions = arr[:, 1:4]  # (N, 3)
-    quats = arr[:, 4:8]  # (N, 4) [qx, qy, qz, qw]
 
-    pos_h = np.hstack([positions, np.ones((len(positions), 1))])  # (N, 4)
-    pos_ref = (T @ pos_h.T).T[:, :3]  # (N, 3)
+    T_odom = np.zeros((len(arr), 4, 4))  # (N, 4, 4)
+    T_odom[:, :3, :3] = Rotation.from_quat(arr[:, 4:8]).as_matrix()  # (N, 3, 3)
+    T_odom[:, :3, 3] = arr[:, 1:4]  # (N, 3)
+    T_odom[:, 3, 3] = 1.0  # (N, )
 
-    R_odom = Rotation.from_quat(quats).as_matrix()  # (N, 3, 3)
-    R_ref = np.einsum("ij,njk->nik", T[:3, :3], R_odom)  # (N, 3, 3)
-    quats_ref = Rotation.from_matrix(R_ref).as_quat()  # (N, 4)
+    T_ref = np.einsum("ij,njk->nik", T, T_odom)  # (N, 4, 4)
 
-    return np.column_stack([timestamps, pos_ref, quats_ref]).tolist()
+    return np.column_stack(
+        [timestamps, T_ref[:, :3, 3], Rotation.from_matrix(T_ref[:, :3, :3]).as_quat()]
+    ).tolist()
