@@ -51,6 +51,10 @@ class PointCloudProcessor:
 
     _cache_dir = None
     _use_cache = True
+    # Memoized (load -> downsample -> normals) clouds, keyed by source params.
+    # Holds static inputs like the reference cloud, so it is processed once
+    # across many alignment cycles rather than per call.
+    _cloud_cache = {}
 
     @staticmethod
     def set_cache_dir(cache_dir: str = None, use_cache: bool = True):
@@ -157,6 +161,41 @@ class PointCloudProcessor:
         )
 
     @staticmethod
+    def load_downsampled(
+        filepath: str,
+        voxel_size: float,
+        normal_radius: float = None,
+        max_nn: int = 30,
+    ) -> o3d.geometry.PointCloud:
+        """
+        Load a cloud from disk, downsample it, and optionally estimate normals.
+
+        The expensive work (loading the full cloud, voxel downsampling, normal
+        estimation) is memoized by (filepath, mtime, voxel_size, normal_radius,
+        max_nn), so a static cloud such as the alignment reference is processed
+        only once across many cycles; a modified file (newer mtime) invalidates
+        its entry. A fresh copy is returned each call, so callers may safely
+        mutate the result without corrupting the shared cache.
+        """
+        key = (
+            filepath,
+            os.path.getmtime(filepath),
+            voxel_size,
+            normal_radius,
+            max_nn,
+        )
+        cached = PointCloudProcessor._cloud_cache.get(key)
+        if cached is None:
+            cached = PointCloudProcessor.downsample(
+                PointCloudProcessor.load_pcd(filepath), voxel_size
+            )
+            if normal_radius is not None:
+                PointCloudProcessor.estimate_normals(cached, normal_radius, max_nn)
+            PointCloudProcessor._cloud_cache[key] = cached
+
+        return o3d.geometry.PointCloud(cached)
+
+    @staticmethod
     def compute_fpfh(
         pcd: o3d.geometry.PointCloud, radius: float = 0.5
     ) -> o3d.pipelines.registration.Feature:
@@ -173,8 +212,12 @@ class PointCloudProcessor:
         Returns:
             FPFH feature descriptor.
         """
-        if PointCloudProcessor._use_cache:
-            cache_path = PointCloudProcessor._get_cache_path(pcd, radius)
+        cache_path = (
+            PointCloudProcessor._get_cache_path(pcd, radius)
+            if PointCloudProcessor._use_cache
+            else None
+        )
+        if cache_path:
             cached_features = PointCloudProcessor._load_cached_features(cache_path)
             if cached_features is not None:
                 print(f"  [✓] Loaded FPFH from cache")
@@ -184,10 +227,7 @@ class PointCloudProcessor:
             pcd, o3d.geometry.KDTreeSearchParamHybrid(radius=radius, max_nn=100)
         )
 
-        if PointCloudProcessor._use_cache:
-            cache_path = PointCloudProcessor._get_cache_path(pcd, radius)
-            PointCloudProcessor._save_cached_features(features, cache_path)
-
+        PointCloudProcessor._save_cached_features(features, cache_path)
         return features
 
 
@@ -246,21 +286,19 @@ def transform_trajectory(trajectory: list, T: np.ndarray) -> list:
     Returns:
         Transformed trajectory with same format.
     """
-    transformed = []
-    for timestamp, x, y, z, qx, qy, qz, qw in trajectory:
-        T_traj = np.eye(4)
-        T_traj[:3, :3] = Rotation.from_quat(np.array([qx, qy, qz, qw])).as_matrix()
-        T_traj[:3, 3] = np.array([x, y, z])
-        T_transformed = T @ T_traj
+    if not trajectory:
+        return []
 
-        transformed.append(
-            [
-                timestamp,
-                T_transformed[0, 3],
-                T_transformed[1, 3],
-                T_transformed[2, 3],
-                *Rotation.from_matrix(T_transformed[:3, :3]).as_quat(),
-            ]
-        )
+    arr = np.array(trajectory)  # (N, 8)
+    timestamps = arr[:, 0:1]  # (N, 1)
+    positions = arr[:, 1:4]  # (N, 3)
+    quats = arr[:, 4:8]  # (N, 4) [qx, qy, qz, qw]
 
-    return transformed
+    pos_h = np.hstack([positions, np.ones((len(positions), 1))])  # (N, 4)
+    pos_ref = (T @ pos_h.T).T[:, :3]  # (N, 3)
+
+    R_odom = Rotation.from_quat(quats).as_matrix()  # (N, 3, 3)
+    R_ref = np.einsum("ij,njk->nik", T[:3, :3], R_odom)  # (N, 3, 3)
+    quats_ref = Rotation.from_matrix(R_ref).as_quat()  # (N, 4)
+
+    return np.column_stack([timestamps, pos_ref, quats_ref]).tolist()

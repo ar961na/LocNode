@@ -37,47 +37,54 @@ class GlobalAlign:
         self.ransac_max_iterations = 1_000_000  # Reduced for 30% speedup
         self.ransac_max_validation = 200  # Reduced for early stopping
 
-    def align(self, source_file: str, target_file: str) -> np.ndarray:
+        self._cached_target_path = None
+        self._cached_target_fpfh = None
+
+    def align(self, source: o3d.geometry.PointCloud, target_file: str) -> np.ndarray:
         """
         Align source point cloud to target.
 
         Args:
-            source_file: Path to source PCD file.
-            target_file: Path to target PCD file.
+            source: Source point cloud object.
+            target_file: Path to target PCD file (cached after first load).
 
         Returns:
             4x4 transformation matrix from target frame to source frame.
         """
         if self.method == GlobalAlignMethod.FPFH_RANSAC:
-            return self._fpfh_ransac_align(source_file, target_file)
+            return self._fpfh_ransac_align(source, target_file)
         else:
             raise ValueError(f"Unknown alignment method: {self.method}")
 
-    def _fpfh_ransac_align(self, source_file: str, target_file: str) -> np.ndarray:
+    def _fpfh_ransac_align(
+        self, source: o3d.geometry.PointCloud, target_file: str
+    ) -> np.ndarray:
         """
         Perform FPFH-RANSAC alignment.
 
         Pipeline:
-        1. Downsample both clouds
+        1. Downsample source; load+downsample target once (cached for subsequent calls)
         2. Estimate surface normals
         3. Compute FPFH features
         4. Match features and estimate transformation via RANSAC
         """
-        source = PointCloudProcessor.load_pcd(source_file)
-        target = PointCloudProcessor.load_pcd(target_file)
+        radius_normal = self.voxel_size * 2
+        radius_feature = self.voxel_size * 5
 
         source_down = PointCloudProcessor.downsample(source, self.voxel_size)
-        target_down = PointCloudProcessor.downsample(target, self.voxel_size)
-
-        # Normal estimation
-        radius_normal = self.voxel_size * 2
         PointCloudProcessor.estimate_normals(source_down, radius_normal)
-        PointCloudProcessor.estimate_normals(target_down, radius_normal)
-
-        # Feature computation
-        radius_feature = self.voxel_size * 5
         source_fpfh = PointCloudProcessor.compute_fpfh(source_down, radius_feature)
-        target_fpfh = PointCloudProcessor.compute_fpfh(target_down, radius_feature)
+
+        # Target cloud (downsample + normals) is memoized in PointCloudProcessor;
+        # the FPFH feature is memoized here since it is specific to this aligner.
+        target_down = PointCloudProcessor.load_downsampled(
+            target_file, self.voxel_size, radius_normal
+        )
+        if target_file != self._cached_target_path:
+            self._cached_target_fpfh = PointCloudProcessor.compute_fpfh(
+                target_down, radius_feature
+            )
+            self._cached_target_path = target_file
 
         distance_threshold = self.voxel_size * 1.5
 
@@ -87,7 +94,7 @@ class GlobalAlign:
                 source_down,
                 target_down,
                 source_fpfh,
-                target_fpfh,
+                self._cached_target_fpfh,
                 False,
                 distance_threshold,
                 o3d.pipelines.registration.TransformationEstimationPointToPoint(False),

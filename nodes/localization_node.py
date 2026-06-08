@@ -114,11 +114,14 @@ class LocalizationNode:
         # State buffers
         self.cloud_buffer = deque()
         self.latest_odom = None
-        self.current_transform = np.eye(4)
-        self.trajectory_buffer = []
+        self.current_transform = None  # None until first successful alignment
+        self.buffer_limit = 10000
+        self.trajectory_buffer = deque(maxlen=self.buffer_limit)
+        # Guards cloud_buffer + trajectory_buffer: subscriber callbacks append
+        # from their own threads while the Timer thread reads/iterates them.
+        self.buffer_lock = threading.Lock()
         self.reference_cloud = None
         self.reference_loaded = False
-        self.buffer_limit = 10000
 
         # Publishers
         self.transform_pub = rospy.Publisher(
@@ -197,12 +200,14 @@ class LocalizationNode:
         """Callback for point cloud messages. Buffer points for accumulation."""
         try:
             now = msg.header.stamp.to_sec()
-            points = []
-            for p in pc2.read_points(msg, skip_nans=True, field_names=("x", "y", "z")):
-                points.append([p[0], p[1], p[2]])
-            if not points:
+            points = np.array(
+                list(pc2.read_points(msg, skip_nans=True, field_names=("x", "y", "z"))),
+                dtype=np.float32,
+            )
+            if len(points) == 0:
                 return
-            self.cloud_buffer.append((now, np.array(points)))
+            with self.buffer_lock:
+                self.cloud_buffer.append((now, points))
         except Exception as e:
             rospy.logerr(f"cloud_callback error: {e}")
 
@@ -217,16 +222,11 @@ class LocalizationNode:
         qy = msg.pose.pose.orientation.y
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
-        self.trajectory_buffer.append([stamp, x, y, z, qx, qy, qz, qw])
-
-        # Limit buffer size
-        if len(self.trajectory_buffer) > self.buffer_limit:
-            self.trajectory_buffer.pop(0)
+        with self.buffer_lock:
+            self.trajectory_buffer.append([stamp, x, y, z, qx, qy, qz, qw])
 
         # Publish transformed odometry if alignment available
-        if self.reference_loaded and not np.array_equal(
-            self.current_transform, np.eye(4)
-        ):
+        if self.reference_loaded and self.current_transform is not None:
             odom_ref = self.transform_odometry(msg, self.current_transform)
             self.odom_ref_pub.publish(odom_ref)
             self.broadcast_tf(odom_ref)
@@ -236,22 +236,24 @@ class LocalizationNode:
         now = rospy.get_time()
         cutoff = now - self.map_accumulation_time
 
-        # Remove old points outside window
-        while self.cloud_buffer and self.cloud_buffer[0][0] < cutoff:
-            self.cloud_buffer.popleft()
+        # Prune the window and snapshot under the lock so a concurrent append
+        # from cloud_callback cannot mutate the deque mid-iteration.
+        with self.buffer_lock:
+            while self.cloud_buffer and self.cloud_buffer[0][0] < cutoff:
+                self.cloud_buffer.popleft()
+            if not self.cloud_buffer:
+                return None
+            all_points = [pts for _, pts in self.cloud_buffer]
 
-        if not self.cloud_buffer:
-            return None
-
-        # Merge all buffered points
-        all_points = []
-        for _, pts in self.cloud_buffer:
-            all_points.append(pts)
         merged = np.vstack(all_points)
-
         pcd = o3d.geometry.PointCloud()
         pcd.points = o3d.utility.Vector3dVector(merged)
         return pcd
+
+    def trajectory_snapshot(self):
+        """Return a thread-safe shallow copy of the trajectory buffer."""
+        with self.buffer_lock:
+            return list(self.trajectory_buffer)
 
     def timer_callback(self, event):
         """Periodic callback for global + local alignment."""
@@ -268,25 +270,35 @@ class LocalizationNode:
             "Starting alignment: %d accumulated points", len(accumulated.points)
         )
         try:
-            # Save accumulated cloud temporarily
-            temp_map = "/tmp/accumulated_map.pcd"
-            o3d.io.write_point_cloud(temp_map, accumulated)
-
             # Global alignment (coarse)
-            T_global = self.global_align.align(temp_map, self.reference_pcd)
+            T_global = self.global_align.align(accumulated, self.reference_pcd)
             fitness_global = self.global_align.get_fitness()
             rospy.loginfo(f"Global fitness: {fitness_global:.4f}")
 
-            # Local alignment (fine-tune from global)
-            T_final = self.local_align.align(temp_map, self.reference_pcd, T_global)
+            # Local alignment (fine-tune). Offer the previous transform as an
+            # alternative seed: it is a near-static prior, so once locked it is
+            # often a better ICP start than a fresh stochastic RANSAC. The
+            # aligner scores both on a consistent metric and warm-starts from
+            # the better one, while RANSAC still runs every cycle as an
+            # independent global check that prevents lock-in.
+            candidate_seeds = (
+                [self.current_transform] if self.current_transform is not None else None
+            )
+            # align() applies the keep/fallback policy internally and returns
+            # the chosen transform; get_fitness() reflects that choice.
+            T_final = self.local_align.align(
+                accumulated,
+                self.reference_pcd,
+                T_global,
+                candidate_seeds=candidate_seeds,
+            )
             fitness_local = self.local_align.get_fitness()
-            rospy.loginfo(f"Local fitness: {fitness_local:.4f}")
-
-            # Use global if local worse (divergence)
-            if fitness_local < fitness_global:
-                rospy.logwarn("Local diverged, using global transform")
-                T_final = T_global
-                fitness_local = fitness_global
+            if self.local_align.has_diverged():
+                rospy.logwarn("Local diverged, using seed transform")
+            rospy.loginfo(
+                f"Local fitness: {fitness_local:.4f} "
+                f"(seed: {self.local_align.get_seed_fitness():.4f})"
+            )
 
             self.current_transform = T_final
             save_transform(
@@ -304,9 +316,11 @@ class LocalizationNode:
             with open(self.log_file, "a") as f:
                 f.write(log_entry)
 
-            # Save trajectory in reference frame
-            if self.trajectory_buffer:
-                traj_ref = transform_trajectory(self.trajectory_buffer, T_final)
+            # Save trajectory in reference frame (snapshot first so odom_callback
+            # cannot mutate the buffer while it is being transformed).
+            traj_snapshot = self.trajectory_snapshot()
+            if traj_snapshot:
+                traj_ref = transform_trajectory(traj_snapshot, T_final)
                 out_file = os.path.join(self.output_dir, "trajectory_reference.txt")
                 self.save_trajectory(traj_ref, out_file)
                 rospy.loginfo(f"Trajectory saved: {len(traj_ref)} poses")
@@ -385,20 +399,20 @@ def main():
         node = LocalizationNode()
         rospy.spin()
 
-        # Save final results on shutdown
+        # Save final results on shutdown (only if an alignment ever succeeded)
         if node.current_transform is not None:
             save_transform(
                 node.current_transform,
                 os.path.join(node.output_dir, "T_map_to_reference.txt"),
             )
             rospy.loginfo("Final transform saved")
-        if node.trajectory_buffer:
-            traj_ref = transform_trajectory(
-                node.trajectory_buffer, node.current_transform
-            )
-            out_file = os.path.join(node.output_dir, "trajectory_reference.txt")
-            node.save_trajectory(traj_ref, out_file)
-            rospy.loginfo("Final trajectory saved")
+
+            traj_snapshot = node.trajectory_snapshot()
+            if traj_snapshot:
+                traj_ref = transform_trajectory(traj_snapshot, node.current_transform)
+                out_file = os.path.join(node.output_dir, "trajectory_reference.txt")
+                node.save_trajectory(traj_ref, out_file)
+                rospy.loginfo("Final trajectory saved")
 
     except rospy.ROSInterruptException:
         pass
