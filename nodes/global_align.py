@@ -35,7 +35,7 @@ class GlobalAlign:
 
         # RANSAC convergence parameters (optimized for speed vs accuracy)
         self.ransac_max_iterations = 1_000_000  # Reduced for 30% speedup
-        self.ransac_confidence = 200  # Reduced for early stopping
+        self.ransac_max_validation = 200  # Reduced for early stopping
 
     def align(self, source_file: str, target_file: str) -> np.ndarray:
         """
@@ -101,7 +101,7 @@ class GlobalAlign:
                     ),
                 ],
                 o3d.pipelines.registration.RANSACConvergenceCriteria(
-                    self.ransac_max_iterations, self.ransac_confidence
+                    self.ransac_max_iterations, self.ransac_max_validation
                 ),
             )
         )
@@ -119,29 +119,29 @@ class GlobalAlign:
         """Set downsampling voxel size."""
         self.voxel_size = voxel_size
 
-    def set_ransac_params(self, max_iterations: int = None, confidence: int = None):
+    def set_ransac_params(self, max_iterations: int = None, max_validation: int = None):
         """
         Tune RANSAC parameters for speed vs accuracy trade-off.
 
         Args:
             max_iterations: Higher value = more accurate but slower (default: 1M).
-            confidence: Higher value = more stringent criteria but slower (default: 200).
+            max_validation: Higher value = more stringent criteria but slower (default: 200).
 
         Presets:
-            - Fast:      1M iterations, 100 confidence (30% faster, lower accuracy)
-            - Balanced:  1M iterations, 200 confidence (30% faster, minimal loss) - DEFAULT
-            - Thorough:  4M iterations, 500 confidence (original, most accurate)
+            - Fast:      1M iterations, 100 max_validation (30% faster, lower accuracy)
+            - Balanced:  1M iterations, 200 max_validation (30% faster, minimal loss) - DEFAULT
+            - Thorough:  4M iterations, 500 max_validation (original, most accurate)
         """
         if max_iterations is not None:
             self.ransac_max_iterations = max_iterations
-        if confidence is not None:
-            self.ransac_confidence = confidence
+        if max_validation is not None:
+            self.ransac_max_validation = max_validation
 
     def get_ransac_params(self) -> dict:
         """Return current RANSAC parameters."""
         return {
             "max_iterations": self.ransac_max_iterations,
-            "confidence": self.ransac_confidence,
+            "max_validation": self.ransac_max_validation,
         }
 
     def get_fitness(self) -> Optional[float]:

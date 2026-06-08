@@ -118,6 +118,7 @@ class LocalizationNode:
         self.trajectory_buffer = []
         self.reference_cloud = None
         self.reference_loaded = False
+        self.buffer_limit = 10000
 
         # Publishers
         self.transform_pub = rospy.Publisher(
@@ -219,7 +220,7 @@ class LocalizationNode:
         self.trajectory_buffer.append([stamp, x, y, z, qx, qy, qz, qw])
 
         # Limit buffer size
-        if len(self.trajectory_buffer) > 10000:
+        if len(self.trajectory_buffer) > self.buffer_limit:
             self.trajectory_buffer.pop(0)
 
         # Publish transformed odometry if alignment available
@@ -335,23 +336,20 @@ class LocalizationNode:
             ]
         )
 
-        # Transform position
-        pos_h = np.append(pos, 1.0)
-        pos_ref = (T @ pos_h)[:3]
-
-        # Transform orientation
-        R_odom = Rotation.from_quat(quat).as_matrix()
-        R_ref = T[:3, :3] @ R_odom
-        quat_ref = Rotation.from_matrix(R_ref).as_quat()
+        T_odom = np.eye(4)
+        T_odom[:3, :3] = Rotation.from_quat(quat).as_matrix()
+        T_odom[:3, 3] = pos
+        T_ref = T @ T_odom
 
         # Create transformed odometry message
         odom_ref = Odometry()
         odom_ref.header = odom_msg.header
         odom_ref.header.frame_id = "reference"
         odom_ref.child_frame_id = odom_msg.child_frame_id
-        odom_ref.pose.pose.position.x = pos_ref[0]
-        odom_ref.pose.pose.position.y = pos_ref[1]
-        odom_ref.pose.pose.position.z = pos_ref[2]
+        odom_ref.pose.pose.position.x = T_ref[0, 3]
+        odom_ref.pose.pose.position.y = T_ref[1, 3]
+        odom_ref.pose.pose.position.z = T_ref[2, 3]
+        quat_ref = Rotation.from_matrix(T_ref[:3, :3]).as_quat()
         odom_ref.pose.pose.orientation.x = quat_ref[0]
         odom_ref.pose.pose.orientation.y = quat_ref[1]
         odom_ref.pose.pose.orientation.z = quat_ref[2]

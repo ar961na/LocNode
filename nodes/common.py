@@ -16,6 +16,7 @@ import numpy as np
 from typing import Optional, Tuple
 import hashlib
 import pickle
+from scipy.spatial.transform import Rotation
 
 try:
     import rospy
@@ -128,18 +129,13 @@ class PointCloudProcessor:
 
         ext = os.path.splitext(filepath)[1].lower()
 
-        if ext == ".pcd":
+        if ext == ".pcd" or ext == ".ply":
             return PointCloudProcessor.load_pcd(filepath)
         elif ext == ".obj":
             mesh = o3d.io.read_triangle_mesh(filepath)
             pcd = mesh.sample_points_uniformly(number_of_points=int(1e6))
             if len(pcd.points) == 0:
                 raise ValueError(f"Empty mesh/point cloud: {filepath}")
-            return pcd
-        elif ext == ".ply":
-            pcd = o3d.io.read_point_cloud(filepath)
-            if len(pcd.points) == 0:
-                raise ValueError(f"Empty point cloud: {filepath}")
             return pcd
         else:
             raise ValueError(f"Unsupported format: {ext}. Use .pcd, .obj, or .ply")
@@ -250,29 +246,20 @@ def transform_trajectory(trajectory: list, T: np.ndarray) -> list:
     Returns:
         Transformed trajectory with same format.
     """
-    from scipy.spatial.transform import Rotation
-
     transformed = []
     for timestamp, x, y, z, qx, qy, qz, qw in trajectory:
-        point = np.array([x, y, z])
-        transformed_point = transform_point(point, T)
-
-        quat = np.array([qx, qy, qz, qw])
-        R_odom = Rotation.from_quat(quat).as_matrix()
-        R_ref = T[:3, :3] @ R_odom
-        R_rot = Rotation.from_matrix(R_ref)
-        quat_transformed = R_rot.as_quat()
+        T_traj = np.eye(4)
+        T_traj[:3, :3] = Rotation.from_quat(np.array([qx, qy, qz, qw])).as_matrix()
+        T_traj[:3, 3] = np.array([x, y, z])
+        T_transformed = T @ T_traj
 
         transformed.append(
             [
                 timestamp,
-                transformed_point[0],
-                transformed_point[1],
-                transformed_point[2],
-                quat_transformed[0],
-                quat_transformed[1],
-                quat_transformed[2],
-                quat_transformed[3],
+                T_transformed[0, 3],
+                T_transformed[1, 3],
+                T_transformed[2, 3],
+                *Rotation.from_matrix(T_transformed[:3, :3]).as_quat(),
             ]
         )
 

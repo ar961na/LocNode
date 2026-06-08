@@ -43,8 +43,7 @@ LocNode/
 └── scripts/
     ├── align_standalone.py          # Offline alignment without ROS
     ├── downsample_reference.py       # Utility to downsample point clouds
-    ├── visualize_trajectory.py       # Visualize and compare trajectories
-    └── create_gif.py                 # Generate rotating GIF from point cloud
+    └── visualize.py                  # Unified visualization (point clouds & trajectories)
 ```
 
 ## Data Folder Setup
@@ -198,13 +197,50 @@ python3 scripts/downsample_reference.py \
   --voxel_size 0.1
 ```
 
-### Visualize Multiple Trajectories
+### Visualize Trajectories and Point Clouds
+
+**Unified visualization script** for both trajectories and point clouds:
 
 ```bash
-python3 scripts/visualize_trajectory.py \
-  --traj trajectory1.txt trajectory2.txt trajectory3.txt \
-  --reference reference.ply
+# Visualize trajectory with reference cloud
+python3 scripts/visualize.py \
+  --traj trajectory.txt \
+  --reference reference.ply \
+  --visualize
+
+# Save trajectory as rotating GIF
+python3 scripts/visualize.py \
+  --traj trajectory.txt \
+  --reference reference.ply \
+  --output trajectory.gif --duration 3
+
+# Visualize multiple trajectories
+python3 scripts/visualize.py \
+  --traj trajectory1.txt trajectory2.txt \
+  --reference reference.ply \
+  --visualize
+
+# Visualize point cloud as rotating GIF
+python3 scripts/visualize.py \
+  --cloud cloud.ply \
+  --output cloud.gif --fps 15 --duration 5
+
+# Interactive point cloud visualization
+python3 scripts/visualize.py \
+  --cloud cloud.ply \
+  --visualize
 ```
+
+**Command-line options:**
+- `--cloud FILE`: Point cloud to visualize (.pcd, .ply, .obj)
+- `--traj FILE [FILE ...]`: Trajectory file(s) in TUM format
+- `--reference FILE`: Reference point cloud for overlay (.pcd, .ply, .obj)
+- `--output FILE`: Save as GIF (if not specified, defaults to `--visualize`)
+- `--visualize, -v`: Show interactive 3D visualization
+- `--fps N`: Frames per second for GIF (default: 10)
+- `--duration N`: Rotation duration in seconds (default: 5)
+- `--width N`: Output width in pixels (default: 1024)
+- `--height N`: Output height in pixels (default: 768)
 
 ## Customization
 

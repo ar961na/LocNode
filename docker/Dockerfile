@@ -27,19 +27,19 @@ RUN apt-get update && apt-get install -y git build-essential \
     && mkdir -p /home/mars_ugv/livox_ws/src \
     && cd /home/mars_ugv/livox_ws/src \
     && git clone https://github.com/Livox-SDK/livox_ros_driver2.git \
-    && cd .. \
+    && cd livox_ros_driver2 \
+    && git checkout 13eb05e4e6dd7a765b934d0c5fd6236676a57b49 \
+    && cd /home/mars_ugv/livox_ws \
     && /bin/bash -c "source /opt/ros/noetic/setup.bash && catkin_make" \
-    && echo "source /home/mars_ugv/livox_ws/devel/setup.bash" >> /home/mars_ugv/.bashrc
+    && echo "source /home/mars_ugv/livox_ws/devel/setup.bash" >> /home/mars_ugv/.bashrc \
+    && rm -rf /var/lib/apt/lists/*
 
 # Copy application code
 COPY nodes/ /opt/fastlio_localization/nodes/
-#COPY docker/pipeline_all_in_docker.py /opt/fastlio_localization/
 COPY docker/docker-entrypoint.sh /opt/fastlio_localization/bin/docker-entrypoint.sh
 COPY launch/ /opt/fastlio_localization/launch/
 COPY config/ /opt/fastlio_localization/config/
 COPY scripts/downsample_reference.py /opt/fastlio_localization/scripts/downsample_reference.py
-
-RUN chmod +x /opt/fastlio_localization/scripts/downsample_reference.py
 
 # Create directories for volumes
 RUN mkdir -p /data /results /opt/fastlio_localization/bin
