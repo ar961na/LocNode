@@ -11,11 +11,12 @@ from nodes.common import (
     PointCloudProcessor,
     save_transform,
     load_transform,
+    is_basin_switch,
+    transform_delta,
     transform_trajectory,
 )
 from nodes.global_align import GlobalAlign
 from nodes.local_align import LocalAlign
-from nodes.localization_node import LocalizationNode
 
 load_reference_cloud = PointCloudProcessor.load_reference_cloud
 
@@ -26,8 +27,9 @@ __all__ = [
     "save_transform",
     "load_transform",
     "load_reference_cloud",
+    "is_basin_switch",
+    "transform_delta",
     "transform_trajectory",
     "GlobalAlign",
     "LocalAlign",
-    "LocalizationNode",
 ]

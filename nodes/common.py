@@ -268,6 +268,34 @@ def load_trajectory(filepath: str) -> list:
     return trajectory
 
 
+def transform_delta(T_a: np.ndarray, T_b: np.ndarray) -> Tuple[float, float]:
+    """
+    Difference between two 4x4 transforms as (rotation_deg, translation_m):
+    geodesic angle of R_b @ R_a.T and distance between origins. Distinguishes
+    basin switches from per-cycle ICP jitter.
+    """
+    R_delta = T_b[:3, :3] @ T_a[:3, :3].T
+    rot_deg = float(
+        np.degrees(np.linalg.norm(Rotation.from_matrix(R_delta).as_rotvec()))
+    )
+    trans_m = float(np.linalg.norm(T_b[:3, 3] - T_a[:3, 3]))
+    return rot_deg, trans_m
+
+
+def is_basin_switch(
+    T_prev: np.ndarray, T_new: np.ndarray, rot_deg: float, trans_m: float
+) -> Optional[Tuple[float, float]]:
+    """
+    Shared basin-switch policy (live node + offline rebuild): a transform that
+    jumps from its predecessor by more than either threshold has left the
+    previous basin. Returns the (rotation_deg, translation_m) delta, else None.
+    """
+    d_rot, d_trans = transform_delta(T_prev, T_new)
+    if d_rot > rot_deg or d_trans > trans_m:
+        return d_rot, d_trans
+    return None
+
+
 def transform_point(point: np.ndarray, T: np.ndarray) -> np.ndarray:
     """Apply 4x4 transformation to a 3D point."""
     p_homo = np.append(point, 1.0)

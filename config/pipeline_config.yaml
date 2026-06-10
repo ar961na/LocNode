@@ -27,6 +27,13 @@ alignment:
   global_method: "FPFH_RANSAC"
   # Local alignment method (P2PLANE_ICP is more robust)
   local_method: "P2PLANE_ICP"
+  # Basin-switch thresholds: a transform jump beyond either rebuilds the
+  # saved reference trajectory (live publishers unaffected).
+  rebase_rotation_deg: 20.0
+  rebase_translation_m: 0.5
+  # Optional initial-pose hint (leave null normally): a 4x4 transform file
+  # path, [x, y, z, qx, qy, qz, qw] start pose, or a 16-element matrix.
+  initial_pose: null
 
 topics:
   # Point cloud topic from FAST-LIO (should contain registered cloud)

@@ -11,7 +11,17 @@ CONTAINER_NAME="fastlio-localization"
 # Get paths
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CONFIG_FILE="$WORKSPACE_ROOT/config/pipeline_config.yaml"
+DEFAULT_CONFIG_FILE="config/pipeline_config.yaml"
+
+# Allow overriding config file via argument
+CONFIG_FILE="$WORKSPACE_ROOT/${1:-$DEFAULT_CONFIG_FILE}"
+
+echo "Using config file: $CONFIG_FILE"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "[!] Config file not found: $CONFIG_FILE"
+    exit 1
+fi
 
 # Read YAML helper
 read_yaml() {
@@ -103,7 +113,7 @@ fi
 
 # Setup output directory on host
 mkdir -p "$WORKSPACE_ROOT/$OUTPUT_DIR_REL"
-cp "$WORKSPACE_ROOT/config/pipeline_config.yaml" "$WORKSPACE_ROOT/$OUTPUT_DIR_REL/"
+cp "$CONFIG_FILE" "$WORKSPACE_ROOT/$OUTPUT_DIR_REL/"
 
 # Remove stale container if exists
 docker rm -f "$CONTAINER_NAME" 2>/dev/null || true
@@ -114,11 +124,11 @@ docker run -d --platform linux/amd64 \
     --name "$CONTAINER_NAME" \
     -v "$WORKSPACE_ROOT/data:/data:ro" \
     -v "$WORKSPACE_ROOT/$OUTPUT_DIR_REL:/results" \
-    -v "$WORKSPACE_ROOT/config:/opt/fastlio_localization/config:ro" \
+    -v "$CONFIG_FILE:/opt/fastlio_localization/config/pipeline_config.yaml:ro" \
     -v "$WORKSPACE_ROOT/nodes:/opt/fastlio_localization/nodes:ro" \
+    -e CONFIG_PATH="/opt/fastlio_localization/config/pipeline_config.yaml" \
     -e REFERENCE_PCD="/data/$REFERENCE_DOWNSAMPLED" \
     -e OUTPUT_DIR="/results" \
-    -e ALIGN_INTERVAL="10.0" \
     "$IMAGE_NAME"
 
 print_success "Container started"
@@ -129,15 +139,47 @@ sleep 20
 
 # Play rosbag
 INTERNAL_BAG_PATH="/data/$BAG_PATH_REL"
+
+# Validate timing against the real rosbag length (ROS lives in the container).
+print_step "Validating timing against rosbag length..."
+is_gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
+BAG_DURATION=$(docker exec "$CONTAINER_NAME" bash -c \
+    "source /opt/ros/noetic/setup.bash && rosbag info -y -k duration $INTERNAL_BAG_PATH" \
+    2>/dev/null || true)
+ALIGN_INTERVAL_CFG=$(read_yaml processing.align_interval || true)
+MAP_ACCUM_CFG=$(read_yaml processing.map_accumulation_time || true)
+if [ -n "$BAG_DURATION" ]; then
+    print_info "Rosbag length: ${BAG_DURATION}s"
+    if is_gt "$DURATION" "$BAG_DURATION"; then
+        echo -e "${YELLOW}[!]${NC} duration (${DURATION}s) exceeds rosbag length (${BAG_DURATION}s); clamping to ${BAG_DURATION}s"
+        DURATION="$BAG_DURATION"
+    fi
+    if [ -n "$ALIGN_INTERVAL_CFG" ] && is_gt "$ALIGN_INTERVAL_CFG" "$BAG_DURATION"; then
+        echo -e "${YELLOW}[!]${NC} align_interval (${ALIGN_INTERVAL_CFG}s) > rosbag length (${BAG_DURATION}s): only the final alignment will run"
+    fi
+    if [ -n "$MAP_ACCUM_CFG" ] && is_gt "$MAP_ACCUM_CFG" "$BAG_DURATION"; then
+        echo -e "${YELLOW}[!]${NC} map_accumulation_time (${MAP_ACCUM_CFG}s) > rosbag length (${BAG_DURATION}s): window covers the whole bag"
+    fi
+else
+    echo -e "${YELLOW}[!]${NC} Could not read rosbag duration; skipping timing validation"
+fi
+
 echo "Playing rosbag: $INTERNAL_BAG_PATH"
 docker exec "$CONTAINER_NAME" bash -c "
     source /opt/ros/noetic/setup.bash &&
     rosbag play $INTERNAL_BAG_PATH --clock -d 2 --duration $DURATION
 "
 
-# Wait for final processing
-echo "Waiting for final alignment..."
-sleep 15
+# Playback done: trigger the node's final alignment of the leftover tail via
+# SIGINT, then wait for the node to finish.
+echo "Playback finished; triggering final alignment..."
+docker exec "$CONTAINER_NAME" pkill -INT -f localization_node.py 2>/dev/null || true
+for _ in $(seq 1 120); do
+    if ! docker exec "$CONTAINER_NAME" pgrep -f localization_node.py >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
 
 # Stop container
 docker stop "$CONTAINER_NAME"

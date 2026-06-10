@@ -33,6 +33,9 @@ from nodes.common import (
     GlobalAlignMethod,
     LocalAlignMethod,
     PointCloudProcessor,
+    is_basin_switch,
+    load_transform,
+    save_trajectory,
     save_transform,
     transform_trajectory,
 )
@@ -47,9 +50,12 @@ class LocalizationNode:
         """Initialize ROS node, load configuration, and setup subscribers/publishers."""
         rospy.init_node("localization_node", anonymous=False)
 
-        # Load configuration
-        config_path = rospy.get_param(
-            "~config", "/opt/fastlio_localization/config/pipeline_config.yaml"
+        # Config path: CONFIG_PATH env > ROS ~config param > default.
+        config_path = os.environ.get(
+            "CONFIG_PATH",
+            rospy.get_param(
+                "~config", "/opt/fastlio_localization/config/pipeline_config.yaml"
+            ),
         )
         if not os.path.exists(config_path):
             rospy.logerr(f"Config file not found: {config_path}")
@@ -81,10 +87,54 @@ class LocalizationNode:
         self.icp_threshold = rospy.get_param(
             "~icp_threshold", config["alignment"]["icp_threshold"]
         )
+        self.rebase_rotation_deg = rospy.get_param(
+            "~rebase_rotation_deg", config["alignment"].get("rebase_rotation_deg", 20.0)
+        )
+        self.rebase_translation_m = rospy.get_param(
+            "~rebase_translation_m",
+            config["alignment"].get("rebase_translation_m", 0.5),
+        )
+        # Optional initial-pose hint: enters alignment only as another
+        # fitness-scored seed, so a wrong/absent value can't hurt results.
+        try:
+            self.initial_pose = self._parse_initial_pose(
+                rospy.get_param(
+                    "~initial_pose", config["alignment"].get("initial_pose")
+                )
+            )
+        except Exception as e:
+            rospy.logerr(f"Invalid initial_pose: {e}")
+            sys.exit(1)
         self.cloud_topic = rospy.get_param(
             "~cloud_topic", config["topics"]["cloud_registered"]
         )
         self.odom_topic = rospy.get_param("~odom_topic", config["topics"]["odometry"])
+
+        # Validate timing parameters: align_interval and map_accumulation_time
+        # must be positive; warn when they exceed the run duration.
+        self.duration = config["processing"].get("duration")
+        for name, val in (
+            ("align_interval", self.align_interval),
+            ("map_accumulation_time", self.map_accumulation_time),
+        ):
+            if val is None or val <= 0:
+                rospy.logerr(f"{name} must be > 0, got {val}")
+                sys.exit(1)
+        if self.duration is not None:
+            if self.align_interval > self.duration:
+                rospy.logwarn(
+                    "align_interval (%ss) > duration (%ss): periodic alignment "
+                    "may not tick; the final alignment still runs",
+                    self.align_interval,
+                    self.duration,
+                )
+            if self.map_accumulation_time > self.duration:
+                rospy.logwarn(
+                    "map_accumulation_time (%ss) > duration (%ss): the window "
+                    "covers the whole run",
+                    self.map_accumulation_time,
+                    self.duration,
+                )
 
         # Validate reference cloud exists
         if not os.path.exists(self.reference_pcd):
@@ -117,11 +167,19 @@ class LocalizationNode:
         self.current_transform = None  # None until first successful alignment
         self.buffer_limit = 10000
         self.trajectory_buffer = deque(maxlen=self.buffer_limit)
-        # Guards cloud_buffer + trajectory_buffer: subscriber callbacks append
-        # from their own threads while the Timer thread reads/iterates them.
+        # Reference-frame trajectory: each pose transformed by the T_final
+        # active when it arrived.
+        self.trajectory_ref_buffer = deque(maxlen=self.buffer_limit)
+        # Same per-cycle poses, but never rebuilt on a basin switch -> saved
+        # as trajectory_reference_raw.txt (keeps the seams).
+        self.trajectory_ref_raw_buffer = deque(maxlen=self.buffer_limit)
+        # Guards the buffers + transform handover across the subscriber
+        # callback threads and the Timer thread.
         self.buffer_lock = threading.Lock()
         self.reference_cloud = None
         self.reference_loaded = False
+        # Set once finalize() runs, so shutdown can't align/save twice.
+        self._finalized = False
 
         # Publishers
         self.transform_pub = rospy.Publisher(
@@ -162,6 +220,45 @@ class LocalizationNode:
         self.odom_ref_pub.publish(test_odom)
 
         rospy.loginfo("LocalizationNode initialized, loading reference cloud...")
+
+    @staticmethod
+    def _parse_initial_pose(value):
+        """
+        Parse the optional initial pose into a 4x4 map->reference matrix.
+
+        Accepts None, a 4x4-matrix file path, a 7-element
+        [x, y, z, qx, qy, qz, qw] start pose, or a 16-element matrix.
+        """
+        if value is None or value == "":
+            return None
+        if isinstance(value, str):
+            T = load_transform(value)
+        else:
+            arr = np.array(value, dtype=float)
+            if arr.shape == (7,):
+                # Built from a (normalized) quaternion: rigid by construction.
+                T = np.eye(4)
+                T[:3, :3] = Rotation.from_quat(arr[3:]).as_matrix()
+                T[:3, 3] = arr[:3]
+                return T
+            if arr.shape not in ((16,), (4, 4)):
+                raise ValueError(
+                    f"initial_pose must be a file path, 7-element pose, or "
+                    f"4x4 matrix; got shape {arr.shape}"
+                )
+            T = arr.reshape(4, 4)
+        # Reject non-rigid matrices loudly rather than carry a dead seed.
+        R = T[:3, :3]
+        if (
+            not np.allclose(R @ R.T, np.eye(3), atol=1e-4)
+            or not np.isclose(np.linalg.det(R), 1.0, atol=1e-4)
+            or not np.allclose(T[3], [0.0, 0.0, 0.0, 1.0], atol=1e-6)
+        ):
+            raise ValueError(
+                "initial_pose is not a rigid transform (rotation block must be "
+                "orthonormal with det +1 and bottom row [0, 0, 0, 1])"
+            )
+        return T
 
     def _load_reference(self):
         """Load reference cloud in background thread."""
@@ -212,7 +309,7 @@ class LocalizationNode:
             rospy.logerr(f"cloud_callback error: {e}")
 
     def odom_callback(self, msg):
-        """Callback for odometry messages. Update trajectory buffer."""
+        """Callback for odometry messages. Update trajectory buffers."""
         self.latest_odom = msg
         stamp = msg.header.stamp.to_sec()
         x = msg.pose.pose.position.x
@@ -222,18 +319,38 @@ class LocalizationNode:
         qy = msg.pose.pose.orientation.y
         qz = msg.pose.pose.orientation.z
         qw = msg.pose.pose.orientation.w
+        pose = [stamp, x, y, z, qx, qy, qz, qw]
+        # Build the odometry matrix outside the lock, reused below for the
+        # buffer row and the published message.
+        T_odom = np.eye(4)
+        T_odom[:3, :3] = Rotation.from_quat([qx, qy, qz, qw]).as_matrix()
+        T_odom[:3, 3] = [x, y, z]
+        # One lock with timer_callback's handover so each pose lands in the
+        # reference trajectory exactly once at first alignment.
         with self.buffer_lock:
-            self.trajectory_buffer.append([stamp, x, y, z, qx, qy, qz, qw])
+            self.trajectory_buffer.append(pose)
+            T = self.current_transform
+            if T is not None:
+                T_ref = T @ T_odom
+                quat_ref = Rotation.from_matrix(T_ref[:3, :3]).as_quat()
+                pose_ref = [stamp, *T_ref[:3, 3], *quat_ref]
+                self.trajectory_ref_buffer.append(pose_ref)
+                self.trajectory_ref_raw_buffer.append(pose_ref)
 
         # Publish transformed odometry if alignment available
-        if self.reference_loaded and self.current_transform is not None:
-            odom_ref = self.transform_odometry(msg, self.current_transform)
+        if self.reference_loaded and T is not None:
+            odom_ref = self.make_odom_ref(msg, T_ref, quat_ref)
             self.odom_ref_pub.publish(odom_ref)
             self.broadcast_tf(odom_ref)
 
-    def get_accumulated_cloud(self):
-        """Get accumulated point cloud within recent time window."""
-        now = rospy.get_time()
+    def get_accumulated_cloud(self, now=None):
+        """Accumulated cloud within the recent window.
+
+        now defaults to sim time; finalize() passes the last cloud stamp
+        (rospy time is unreliable at shutdown).
+        """
+        if now is None:
+            now = rospy.get_time()
         cutoff = now - self.map_accumulation_time
 
         # Prune the window and snapshot under the lock so a concurrent append
@@ -250,22 +367,31 @@ class LocalizationNode:
         pcd.points = o3d.utility.Vector3dVector(merged)
         return pcd
 
-    def trajectory_snapshot(self):
-        """Return a thread-safe shallow copy of the trajectory buffer."""
+    def _snapshot(self, buffer):
+        """Return a thread-safe shallow copy of a trajectory buffer."""
         with self.buffer_lock:
-            return list(self.trajectory_buffer)
+            return list(buffer)
 
     def timer_callback(self, event):
-        """Periodic callback for global + local alignment."""
+        """Periodic callback: align the recent window and publish live."""
         if not self.reference_loaded:
             rospy.logwarn("Reference not ready, alignment skipped")
             return
 
-        accumulated = self.get_accumulated_cloud()
+        now = rospy.get_time()
+        accumulated = self.get_accumulated_cloud(now)
         if accumulated is None or len(accumulated.points) == 0:
             rospy.logwarn("No accumulated cloud, alignment skipped")
             return
 
+        self._do_alignment(accumulated, publish=True, stamp=now)
+
+    def _do_alignment(self, accumulated, publish, stamp):
+        """Align accumulated to the reference, record the transform, and save.
+
+        publish gates live ROS publishes; stamp is the handover/log time used
+        at shutdown (live sim time otherwise).
+        """
         rospy.loginfo(
             "Starting alignment: %d accumulated points", len(accumulated.points)
         )
@@ -275,15 +401,13 @@ class LocalizationNode:
             fitness_global = self.global_align.get_fitness()
             rospy.loginfo(f"Global fitness: {fitness_global:.4f}")
 
-            # Local alignment (fine-tune). Offer the previous transform as an
-            # alternative seed: it is a near-static prior, so once locked it is
-            # often a better ICP start than a fresh stochastic RANSAC. The
-            # aligner scores both on a consistent metric and warm-starts from
-            # the better one, while RANSAC still runs every cycle as an
-            # independent global check that prevents lock-in.
-            candidate_seeds = (
-                [self.current_transform] if self.current_transform is not None else None
-            )
+            # Fine-tune. Seed ICP with the previous transform and the optional
+            # initial pose (both quasi-static priors): align() scores each
+            # against fresh RANSAC and warm-starts from the best, so a good
+            # prior helps only by winning on fitness, never by fiat.
+            candidate_seeds = [
+                T for T in (self.current_transform, self.initial_pose) if T is not None
+            ]
             # align() applies the keep/fallback policy internally and returns
             # the chosen transform; get_fitness() reflects that choice.
             T_final = self.local_align.align(
@@ -300,62 +424,116 @@ class LocalizationNode:
                 f"(seed: {self.local_align.get_seed_fitness():.4f})"
             )
 
-            self.current_transform = T_final
+            # Handover under one lock. First alignment: backfill both buffers.
+            # Basin switch: rebuild only the rebased buffer from raw odometry;
+            # the raw buffer keeps its per-cycle seams.
+            rebase_delta = None
+            with self.buffer_lock:
+                if self.current_transform is None and self.trajectory_buffer:
+                    backfill = transform_trajectory(
+                        list(self.trajectory_buffer), T_final
+                    )
+                    self.trajectory_ref_buffer.extend(backfill)
+                    self.trajectory_ref_raw_buffer.extend(backfill)
+                elif self.current_transform is not None:
+                    rebase_delta = is_basin_switch(
+                        self.current_transform,
+                        T_final,
+                        self.rebase_rotation_deg,
+                        self.rebase_translation_m,
+                    )
+                    if rebase_delta is not None:
+                        # Rare, bounded stall; the lock keeps the rebuild
+                        # atomic with odom appends.
+                        self.trajectory_ref_buffer.clear()
+                        self.trajectory_ref_buffer.extend(
+                            transform_trajectory(list(self.trajectory_buffer), T_final)
+                        )
+                self.current_transform = T_final
+                # Handover stamp: live sim
+                # time normally, the passed stamp at shutdown.
+                align_stamp = (
+                    stamp if rospy.is_shutdown() else rospy.Time.now().to_sec()
+                )
+
+            # Log before publishing so a publish failure can't lose the
+            # record the offline rebuild needs.
+            transform_flat = T_final.flatten().tolist()
+            transform_str = " ".join([f"{x:.6f}" for x in transform_flat])
+            log_entry = f"{align_stamp}, {len(accumulated.points)}, {fitness_global:.6f}, {fitness_local:.6f}, {transform_str}\n"
+            with open(self.log_file, "a") as f:
+                f.write(log_entry)
+
+            if rebase_delta is not None:
+                rospy.logwarn(
+                    "Transform jumped %.1f deg / %.2f m: basin switch, "
+                    "reference trajectory rebased onto new transform",
+                    *rebase_delta,
+                )
             save_transform(
                 T_final, os.path.join(self.output_dir, "T_map_to_reference.txt")
             )
 
-            # Publish results
-            self.transform_pub.publish(String(f"T_final:\n{T_final}"))
-            self.fitness_pub.publish(Float32(fitness_local))
+            # Live publishes only (skipped during shutdown finalize).
+            if publish and not rospy.is_shutdown():
+                self.transform_pub.publish(String(f"T_final:\n{T_final}"))
+                self.fitness_pub.publish(Float32(fitness_local))
 
-            # Log alignment
-            transform_flat = T_final.flatten().tolist()
-            transform_str = " ".join([f"{x:.6f}" for x in transform_flat])
-            log_entry = f"{rospy.Time.now().to_sec()}, {len(accumulated.points)}, {fitness_global:.6f}, {fitness_local:.6f}, {transform_str}\n"
-            with open(self.log_file, "a") as f:
-                f.write(log_entry)
-
-            # Save trajectory in reference frame (snapshot first so odom_callback
-            # cannot mutate the buffer while it is being transformed).
-            traj_snapshot = self.trajectory_snapshot()
-            if traj_snapshot:
-                traj_ref = transform_trajectory(traj_snapshot, T_final)
-                out_file = os.path.join(self.output_dir, "trajectory_reference.txt")
-                self.save_trajectory(traj_ref, out_file)
+            # Save both: trajectory_reference.txt (rebased) and
+            # trajectory_reference_raw.txt (per-cycle, with seams).
+            traj_ref = self._snapshot(self.trajectory_ref_buffer)
+            if traj_ref:
+                save_trajectory(
+                    traj_ref,
+                    os.path.join(self.output_dir, "trajectory_reference.txt"),
+                )
                 rospy.loginfo(f"Trajectory saved: {len(traj_ref)} poses")
+            traj_raw = self._snapshot(self.trajectory_ref_raw_buffer)
+            if traj_raw:
+                save_trajectory(
+                    traj_raw,
+                    os.path.join(self.output_dir, "trajectory_reference_raw.txt"),
+                )
 
             rospy.loginfo("Alignment completed")
 
         except Exception as e:
             rospy.logerr(f"Alignment error: {e}")
+            err_stamp = stamp if rospy.is_shutdown() else rospy.Time.now().to_sec()
             with open(self.log_file, "a") as f:
-                f.write(f"{rospy.Time.now().to_sec()}, ERROR, {str(e)}\n")
+                f.write(f"{err_stamp}, ERROR, {str(e)}\n")
 
-    def transform_odometry(self, odom_msg, T):
-        """Transform odometry pose to reference frame using 4x4 matrix."""
-        pos = np.array(
-            [
-                odom_msg.pose.pose.position.x,
-                odom_msg.pose.pose.position.y,
-                odom_msg.pose.pose.position.z,
-            ]
-        )
-        quat = np.array(
-            [
-                odom_msg.pose.pose.orientation.x,
-                odom_msg.pose.pose.orientation.y,
-                odom_msg.pose.pose.orientation.z,
-                odom_msg.pose.pose.orientation.w,
-            ]
-        )
+    def finalize(self):
+        """Align the leftover tail and save, at shutdown.
 
-        T_odom = np.eye(4)
-        T_odom[:3, :3] = Rotation.from_quat(quat).as_matrix()
-        T_odom[:3, 3] = pos
-        T_ref = T @ T_odom
+        Guarantees a result even if the periodic timer never fired
+        (align_interval >= bag duration). Runs once; no live publishes.
+        """
+        if self._finalized:
+            return
+        self._finalized = True
+        try:
+            if self.timer is not None:
+                self.timer.shutdown()
+            if not self.reference_loaded:
+                rospy.logwarn("Reference never loaded; nothing to finalize")
+                return
+            with self.buffer_lock:
+                last_stamp = self.cloud_buffer[-1][0] if self.cloud_buffer else None
+            if last_stamp is None:
+                rospy.logwarn("No clouds buffered; nothing to finalize")
+                return
+            accumulated = self.get_accumulated_cloud(last_stamp)
+            if accumulated is None or len(accumulated.points) == 0:
+                rospy.logwarn("No accumulated cloud for final alignment")
+                return
+            rospy.loginfo("Final alignment of leftover tail")
+            self._do_alignment(accumulated, publish=False, stamp=last_stamp)
+        except Exception as e:
+            rospy.logwarn(f"Finalize failed: {e}")
 
-        # Create transformed odometry message
+    def make_odom_ref(self, odom_msg, T_ref, quat_ref):
+        """Build a reference-frame Odometry message from a precomputed pose."""
         odom_ref = Odometry()
         odom_ref.header = odom_msg.header
         odom_ref.header.frame_id = "reference"
@@ -363,7 +541,6 @@ class LocalizationNode:
         odom_ref.pose.pose.position.x = T_ref[0, 3]
         odom_ref.pose.pose.position.y = T_ref[1, 3]
         odom_ref.pose.pose.position.z = T_ref[2, 3]
-        quat_ref = Rotation.from_matrix(T_ref[:3, :3]).as_quat()
         odom_ref.pose.pose.orientation.x = quat_ref[0]
         odom_ref.pose.pose.orientation.y = quat_ref[1]
         odom_ref.pose.pose.orientation.z = quat_ref[2]
@@ -383,37 +560,14 @@ class LocalizationNode:
         t.transform.rotation = odom_ref.pose.pose.orientation
         self.tf_broadcaster.sendTransform(t)
 
-    @staticmethod
-    def save_trajectory(trajectory, filepath):
-        """Save trajectory to TUM format file."""
-        with open(filepath, "w") as f:
-            for stamp, x, y, z, qx, qy, qz, qw in trajectory:
-                f.write(
-                    f"{stamp:.9f} {x:.8f} {y:.8f} {z:.8f} {qx:.8f} {qy:.8f} {qz:.8f} {qw:.8f}\n"
-                )
-
 
 def main():
-    """Main entry point. Initialize node and spin."""
+    """Main entry point: init node, spin, then finalize on shutdown."""
     try:
         node = LocalizationNode()
         rospy.spin()
-
-        # Save final results on shutdown (only if an alignment ever succeeded)
-        if node.current_transform is not None:
-            save_transform(
-                node.current_transform,
-                os.path.join(node.output_dir, "T_map_to_reference.txt"),
-            )
-            rospy.loginfo("Final transform saved")
-
-            traj_snapshot = node.trajectory_snapshot()
-            if traj_snapshot:
-                traj_ref = transform_trajectory(traj_snapshot, node.current_transform)
-                out_file = os.path.join(node.output_dir, "trajectory_reference.txt")
-                node.save_trajectory(traj_ref, out_file)
-                rospy.loginfo("Final trajectory saved")
-
+        # SIGINT after playback makes spin() return; align the tail and save.
+        node.finalize()
     except rospy.ROSInterruptException:
         pass
     except Exception as e:
