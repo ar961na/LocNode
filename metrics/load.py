@@ -1,7 +1,17 @@
 """Trajectory loading utilities."""
 
 import numpy as np
-import pandas as pd
+
+
+def _csv_header_rows(filepath):
+    """Number of leading header rows in a .csv (0 or 1, sniffed)."""
+    with open(filepath) as f:
+        first = f.readline()
+    try:
+        [float(tok) for tok in first.strip().split(",") if tok != ""]
+        return 0
+    except ValueError:
+        return 1
 
 
 def load_trajectory(filepath, quat_order="xyzw"):
@@ -30,7 +40,7 @@ def load_trajectory(filepath, quat_order="xyzw"):
         if filepath is not .csv or .txt format, or rows are malformed
     """
     if filepath.endswith(".csv"):
-        data = pd.read_csv(filepath).to_numpy(dtype=float)
+        data = np.loadtxt(filepath, delimiter=",", skiprows=_csv_header_rows(filepath))
     elif filepath.endswith(".txt"):
         data = np.loadtxt(filepath, comments="#", dtype=float)
     else:

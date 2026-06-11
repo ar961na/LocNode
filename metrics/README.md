@@ -20,8 +20,8 @@ Computes trajectory errors of algorithm trajectories against a groundtruth:
 ```bash
 pip install -r requirements.txt
 ```
-`numpy`, `scipy`, `tabulate` are required; `pandas` (CSV input) and
-`open3d` (`-p` plotting) are optional.
+`numpy`, `scipy`, `tabulate` are required; `open3d` (`-p` plotting) is
+optional.
 
 # Usage
 ```bash
