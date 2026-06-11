@@ -31,8 +31,9 @@ with open('$CONFIG_FILE') as f:
     c = yaml.safe_load(f)
 val = c
 for k in '$1'.split('.'):
-    val = val.get(k)
+    val = val.get(k) if isinstance(val, dict) else None
     if val is None:
+        sys.stderr.write('[!] Missing config key: $1 in $CONFIG_FILE\n')
         sys.exit(1)
 print(val)
 "
@@ -146,8 +147,8 @@ is_gt() { awk -v a="$1" -v b="$2" 'BEGIN { exit !(a > b) }'; }
 BAG_DURATION=$(docker exec "$CONTAINER_NAME" bash -c \
     "source /opt/ros/noetic/setup.bash && rosbag info -y -k duration $INTERNAL_BAG_PATH" \
     2>/dev/null || true)
-ALIGN_INTERVAL_CFG=$(read_yaml processing.align_interval || true)
-MAP_ACCUM_CFG=$(read_yaml processing.map_accumulation_time || true)
+ALIGN_INTERVAL_CFG=$(read_yaml processing.align_interval 2>/dev/null || true)
+MAP_ACCUM_CFG=$(read_yaml processing.map_accumulation_time 2>/dev/null || true)
 if [ -n "$BAG_DURATION" ]; then
     print_info "Rosbag length: ${BAG_DURATION}s"
     if is_gt "$DURATION" "$BAG_DURATION"; then

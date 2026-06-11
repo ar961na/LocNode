@@ -1,8 +1,8 @@
 # Stage 1: Get uv binary for fast Python package installation
-FROM ghcr.io/astral-sh/uv:latest AS uv-bin
+FROM ghcr.io/astral-sh/uv:latest@sha256:eaa5f1a3305307aaf9e67fe2bbba1d85ebbb2d8a63bce23af21797bfafbe0f8b AS uv-bin
 
 # Stage 2: FAST-LIO2 + localization image
-FROM kenny0407/marslab_fastlio2:latest
+FROM kenny0407/marslab_fastlio2:latest@sha256:a95402bb9e9a8ec579399506966dd6641d668a1e6caf85f1b49738157df37a01
 
 WORKDIR /opt/fastlio_localization
 
@@ -17,10 +17,14 @@ ENV PYTHONPATH="/usr/local/lib/python3.8/dist-packages:/usr/lib/python3/dist-pac
 # Install Python dependencies
 COPY docker/requirements-docker.txt /tmp/requirements-docker.txt
 RUN uv pip install --system --break-system-packages -r /tmp/requirements-docker.txt && \
-    python3 -c "import open3d, numpy, scipy, cv2; print('✓ Dependencies OK')"
+    python3 -c "import open3d, numpy, scipy, yaml; print('✓ Dependencies OK')"
 
-# Fix ROS GPG key expiration issue
-RUN apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-key F42ED6FBAB17C654
+ADD https://raw.githubusercontent.com/ros/rosdistro/master/ros.key /tmp/ros.key
+RUN gpg --dearmor < /tmp/ros.key > /usr/share/keyrings/ros-archive-keyring.gpg \
+    && chmod 644 /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu focal main" \
+       > /etc/apt/sources.list.d/ros1-latest.list \
+    && rm /tmp/ros.key
 
 # Install livox_ros_driver2 for Livox LiDAR support
 RUN apt-get update && apt-get install -y git build-essential \

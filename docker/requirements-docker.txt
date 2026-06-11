@@ -2,7 +2,5 @@
 
 numpy==1.23.5
 scipy==1.9.3
-scikit-learn==0.23.0
-opencv-python==4.8.1.78
 PyYAML==6.0.2
 open3d==0.15.2
