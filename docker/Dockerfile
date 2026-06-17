@@ -1,0 +1,58 @@
+# Stage 1: Get uv binary for fast Python package installation
+FROM ghcr.io/astral-sh/uv:latest@sha256:eaa5f1a3305307aaf9e67fe2bbba1d85ebbb2d8a63bce23af21797bfafbe0f8b AS uv-bin
+
+# Stage 2: FAST-LIO2 + localization image
+FROM kenny0407/marslab_fastlio2:latest@sha256:a95402bb9e9a8ec579399506966dd6641d668a1e6caf85f1b49738157df37a01
+
+WORKDIR /opt/fastlio_localization
+
+# Copy uv package manager from official image
+COPY --from=uv-bin /uv /uvx /bin/
+
+# Switch to root for installation
+USER root
+
+ENV PYTHONPATH="/usr/local/lib/python3.8/dist-packages:/usr/lib/python3/dist-packages"
+
+# Install Python dependencies
+COPY docker/requirements-docker.txt /tmp/requirements-docker.txt
+RUN uv pip install --system --break-system-packages -r /tmp/requirements-docker.txt && \
+    python3 -c "import open3d, numpy, scipy, yaml; print('✓ Dependencies OK')"
+
+ADD https://raw.githubusercontent.com/ros/rosdistro/master/ros.key /tmp/ros.key
+RUN gpg --dearmor < /tmp/ros.key > /usr/share/keyrings/ros-archive-keyring.gpg \
+    && chmod 644 /usr/share/keyrings/ros-archive-keyring.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros/ubuntu focal main" \
+       > /etc/apt/sources.list.d/ros1-latest.list \
+    && rm /tmp/ros.key
+
+# Install livox_ros_driver2 for Livox LiDAR support
+RUN apt-get update && apt-get install -y git build-essential \
+    && mkdir -p /home/mars_ugv/livox_ws/src \
+    && cd /home/mars_ugv/livox_ws/src \
+    && git clone https://github.com/Livox-SDK/livox_ros_driver2.git \
+    && cd livox_ros_driver2 \
+    && git checkout 13eb05e4e6dd7a765b934d0c5fd6236676a57b49 \
+    && cd /home/mars_ugv/livox_ws \
+    && /bin/bash -c "source /opt/ros/noetic/setup.bash && catkin_make" \
+    && echo "source /home/mars_ugv/livox_ws/devel/setup.bash" >> /home/mars_ugv/.bashrc \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy application code
+COPY nodes/ /opt/fastlio_localization/nodes/
+COPY docker/docker-entrypoint.sh /opt/fastlio_localization/bin/docker-entrypoint.sh
+COPY launch/ /opt/fastlio_localization/launch/
+COPY config/ /opt/fastlio_localization/config/
+COPY scripts/downsample_reference.py /opt/fastlio_localization/scripts/downsample_reference.py
+
+# Create directories for volumes
+RUN mkdir -p /data /results /opt/fastlio_localization/bin
+
+# Set permissions and switch to non-root user
+RUN chown -R mars_ugv:mars_ugv /opt/fastlio_localization /data /results && \
+    chmod +x /opt/fastlio_localization/bin/docker-entrypoint.sh
+USER mars_ugv
+
+# Entry point for container
+ENTRYPOINT ["/opt/fastlio_localization/bin/docker-entrypoint.sh"]
+CMD ["/bin/bash"]

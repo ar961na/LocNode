@@ -1,0 +1,15 @@
+<?xml version="1.0"?>
+<!-- ROS launch file for localization node -->
+<launch>
+  <!-- Path to reference point cloud for alignment -->
+  <arg name="reference_pcd" default="data/reference.pcd"/>
+  
+  <!-- Output directory for results and logs -->
+  <arg name="output_dir" default="data/"/>
+  
+  <!-- Localization node: accumulates clouds and aligns to reference -->
+  <node name="localization_node" pkg="your_package" type="localization_node.py" output="screen">
+    <param name="reference_pcd" value="$(arg reference_pcd)"/>
+    <param name="output_dir" value="$(arg output_dir)"/>
+  </node>
+</launch>
